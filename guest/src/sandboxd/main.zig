@@ -47,7 +47,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     log.info("starting", .{});
     const fd = try shared.virtio_port.open("virtio-port", .nonblocking);
-    defer sys.close(fd);
     log.info("opened virtio port", .{});
 
     // SIGCHLD is consumed through a signalfd; the original mask is restored
@@ -58,13 +57,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var daemon: Daemon = .{
         .gpa = gpa,
-        .channel = .init(gpa, fd),
+        .channel = .initPort(gpa, fd, "virtio-port"),
         .sigchld_fd = sigchld_fd,
         .spawn_ctx = .{ .environ = init.environ.block.slice.ptr, .sigmask = sigmask },
         .transfers = .init(gpa, "/"),
         .arena = .init(gpa),
     };
     defer daemon.deinit();
+    // the channel may replace its fd when it reconnects (vsock)
+    defer sys.close(daemon.channel.fd);
 
     daemon.sendVfsStatus();
     try daemon.run();
@@ -257,7 +258,7 @@ const Daemon = struct {
                     return self.sendError(id, "exec_failed", "failed to execute");
                 };
             },
-            inline .stdin_data, .pty_resize, .exec_window => |input_tag| {
+            inline .stdin_data, .pty_resize, .exec_window, .exec_signal => |input_tag| {
                 const id, const input = parse(env, arena, input_tag) catch
                     return self.sendError(0, "invalid_request", "invalid exec input");
                 const session = self.sessions.get(id) orelse
@@ -270,6 +271,8 @@ const Daemon = struct {
                     },
                     .pty_resize => session.resize(input),
                     .exec_window => session.addOutputCredit(input),
+                    .exec_signal => session.signal(input.signal) catch
+                        return self.sendError(id, "invalid_request", "invalid signal"),
                     else => comptime unreachable,
                 }
             },
@@ -320,10 +323,14 @@ const Daemon = struct {
     }
 
     fn trySendVfsStatus(self: *Daemon) !void {
-        const message = try readVfsError(self.gpa) orelse return self.outbox().send(.vfs_ready, 0, .{});
+        const message = try readVfsError(self.gpa) orelse
+            return self.outbox().send(.vfs_ready, 0, .{ .features = protocol.features });
         defer self.gpa.free(message);
         const detail = std.mem.trim(u8, message, " \r\n\t");
-        try self.outbox().send(.vfs_error, 0, .{ .message = if (detail.len > 0) detail else "vfs mount not ready" });
+        try self.outbox().send(.vfs_error, 0, .{
+            .message = if (detail.len > 0) detail else "vfs mount not ready",
+            .features = protocol.features,
+        });
     }
 };
 

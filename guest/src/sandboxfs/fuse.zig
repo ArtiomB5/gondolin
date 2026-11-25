@@ -42,6 +42,7 @@ pub const Opcode = enum(u32) {
     ioctl = 39,
     batch_forget = 42,
     fallocate = 43,
+    readdirplus = 44,
     rename2 = 45,
     copy_file_range = 47,
     _,
@@ -51,6 +52,10 @@ pub const Opcode = enum(u32) {
 pub const init_flags = struct {
     pub const atomic_o_trunc: u32 = 1 << 3;
     pub const big_writes: u32 = 1 << 5;
+    /// `InitOut.max_pages` is valid (protocol 7.28)
+    pub const max_pages: u32 = 1 << 22;
+    /// directory listings with attributes (READDIRPLUS instead of READDIR)
+    pub const do_readdirplus: u32 = 1 << 13;
 };
 
 /// `FATTR_*` bits in `SetattrIn.valid`
@@ -261,6 +266,19 @@ pub const SetattrIn = extern struct {
     unused5: u32,
 };
 
+pub const FlushIn = extern struct {
+    fh: u64,
+    unused: u32,
+    padding: u32,
+    lock_owner: u64,
+};
+
+pub const FsyncIn = extern struct {
+    fh: u64,
+    fsync_flags: u32,
+    padding: u32,
+};
+
 pub const ReleaseIn = extern struct {
     fh: u64,
     flags: u32,
@@ -304,6 +322,17 @@ pub fn name(bytes: []const u8) Parsed([]const u8) {
 /// Size of a directory entry record including padding to 8 bytes.
 pub fn direntSize(name_len: usize) usize {
     return std.mem.alignForward(usize, @sizeOf(Dirent) + name_len, 8);
+}
+
+/// Size of a READDIRPLUS record (`EntryOut`, `Dirent`, name, padding).
+pub fn direntplusSize(name_len: usize) usize {
+    return std.mem.alignForward(usize, @sizeOf(EntryOut) + @sizeOf(Dirent) + name_len, 8);
+}
+
+test "direntplus records" {
+    try std.testing.expectEqual(@as(usize, 128), @sizeOf(EntryOut));
+    try std.testing.expectEqual(@as(usize, 160), direntplusSize(1));
+    try std.testing.expectEqual(@as(usize, 168), direntplusSize(9));
 }
 
 test "request parsing" {
